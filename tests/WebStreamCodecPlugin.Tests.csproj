@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- xunit v3 ships its own in-process test host and runs as a normal
+         executable, so the test project must produce an exe. -->
+    <OutputType>Exe</OutputType>
+    <!-- Assembly name must match the plugin's InternalsVisibleTo target. -->
+    <AssemblyName>WebStreamCodecPlugin.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Plugin under test. Pulls in SoundBoard.PluginApi transitively, but
+         both that and NAudio.Core are referenced by the plugin with
+         ExcludeAssets="runtime" (the host owns the live copies at runtime).
+         The test host has no host to defer to, so it needs the runtime
+         assemblies present — reference them directly below. -->
+    <ProjectReference Include="..\src\WebStreamCodecPlugin.csproj" />
+
+    <PackageReference Include="SoundBoard.PluginApi" Version="1.0.0-beta.1" />
+    <PackageReference Include="NAudio.Core" Version="2.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
+    <!-- Pinned to 7.x: FluentAssertions 8.x switched to a paid license. -->
+    <PackageReference Include="FluentAssertions" Version="7.2.2" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,10 @@
+{
+  "publisher": "github.DevinSanders",
+  "id": "codec.webstream",
+  "name": "Web Stream Codec",
+  "version": "1.0.0",
+  "author": "Devin Sanders",
+  "description": "Cross-platform URL-based audio streaming over HTTP/HTTPS. Transport-only — delegates decoding to installed codec plugins (gmsb-codec-mp3, gmsb-codec-ogg, gmsb-codec-flac, ...) via the host's IAudioCodecRegistry. Detects per-URL seekability via HEAD probe.",
+  "entryDll": "WebStreamCodecPlugin.dll",
+  "isTheme": false
+}

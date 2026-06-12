@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>WebStreamCodecPlugin</AssemblyName>
+    <RootNamespace>WebStreamCodecPlugin</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <!-- Default for local dev builds. CI release.yml overrides via
+         `-p:Version=<tag-derived>`; PluginVersion.OfAssembly reads it
+         at runtime. Keep in sync with plugin.json for local builds. -->
+    <Version>1.0.0</Version>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Host provides SoundBoard.PluginApi at runtime (PluginLoadContext defers to the default ALC), so ExcludeAssets="runtime" keeps the compile reference but strips it from the plugin's output. -->
+    <PackageReference Include="SoundBoard.PluginApi" Version="1.0.0-beta.1" ExcludeAssets="runtime" />
+
+    <!-- NAudio.Core flows in transitively through SoundBoard.PluginApi. The
+         host owns the live NAudio instance; if we shipped our own copy here
+         the WaveStream the host expects from CreateStream would be a
+         different CLR type than ours and casts would fail.
+         ExcludeAssets="runtime" keeps the compile-time reference but strips
+         NAudio.Core.dll from the publish output. -->
+    <PackageReference Include="NAudio.Core" Version="2.3.0" ExcludeAssets="runtime" />
+
+    <!-- No decoder dependencies. This is a transport-only plugin; it
+         delegates decoding to whatever codec plugin (gmsb-codec-mp3,
+         gmsb-codec-ogg, gmsb-codec-flac, ...) the user has installed
+         via the host's IAudioCodecRegistry. See WebStreamCodecPlugin.cs
+         for the dispatch logic and the README for the design rationale.
+         If you want to bring back a bundled decoder, you almost
+         certainly want a separate format-specific codec plugin instead. -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="plugin.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The test project exercises the internal dispatch helpers
+         (ResolveCodec / Find* / ExtensionFromUrl), the internal transport
+         Stream classes, and the internal HttpClient test seam. -->
+    <InternalsVisibleTo Include="WebStreamCodecPlugin.Tests" />
+  </ItemGroup>
+
+</Project>
