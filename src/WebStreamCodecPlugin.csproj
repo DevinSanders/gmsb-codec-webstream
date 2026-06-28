@@ -33,6 +33,13 @@
          for the dispatch logic and the README for the design rationale.
          If you want to bring back a bundled decoder, you almost
          certainly want a separate format-specific codec plugin instead. -->
+
+    <!-- YoutubeExplode resolves youtube.com / youtu.be page URLs to a
+         direct CDN URL that the rest of the HEAD-probe / transport /
+         dispatch path can handle as ordinary HTTP audio. Pure-managed
+         (no native deps) — unlike the SDK/NAudio.Core the host does NOT
+         ship a copy of this, so we bundle it (no ExcludeAssets). -->
+    <PackageReference Include="YoutubeExplode" Version="6.6.0" />
   </ItemGroup>
 
   <ItemGroup>

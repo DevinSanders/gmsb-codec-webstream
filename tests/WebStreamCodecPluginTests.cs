@@ -13,7 +13,11 @@ public sealed class WebStreamCodecPluginTests : IDisposable
 {
     private readonly WebStreamCodecPlugin _plugin = new();
 
-    public void Dispose() => WebStreamCodecPlugin.HttpClientOverride = null;
+    public void Dispose()
+    {
+        WebStreamCodecPlugin.HttpClientOverride = null;
+        WebStreamCodecPlugin.YouTubeResolverOverride = null;
+    }
 
     private static WebStreamCodecPlugin WithRegistry(params SoundBoard.PluginApi.IAudioCodecPlugin[] codecs)
     {
@@ -161,5 +165,95 @@ public sealed class WebStreamCodecPluginTests : IDisposable
         codec.ReceivedStream.Should().NotBeNull();
         codec.ReceivedStream!.Invoking(s => s.ReadByte())
             .Should().Throw<ObjectDisposedException>();
+    }
+
+    // ── YouTube resolution ────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("https://www.youtube.com/watch?v=dQw4w9WgXcQ")]
+    [InlineData("https://youtube.com/watch?v=dQw4w9WgXcQ")]
+    [InlineData("https://youtu.be/dQw4w9WgXcQ")]
+    [InlineData("https://music.youtube.com/watch?v=dQw4w9WgXcQ")]
+    [InlineData("https://m.youtube.com/watch?v=dQw4w9WgXcQ")]
+    [InlineData("HTTPS://WWW.YOUTUBE.COM/WATCH?V=ABC")]    // case-insensitive
+    public void IsYouTubeUrl_recognises_canonical_forms(string url)
+    {
+        YouTubeResolver.IsYouTubeUrl(url).Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("https://ice1.somafm.com/groovesalad-128-mp3")]
+    [InlineData("https://example.com/podcast.mp3")]
+    [InlineData("https://notyoutube.com/watch?v=x")]       // similar shape but not YouTube
+    [InlineData("")]
+    public void IsYouTubeUrl_rejects_other_urls(string url)
+    {
+        YouTubeResolver.IsYouTubeUrl(url).Should().BeFalse();
+    }
+
+    [Fact]
+    public void YouTube_url_is_resolved_before_probe_and_dispatch()
+    {
+        // The whole point of the resolver: HEAD probe + dispatch see the
+        // RESOLVED CDN URL, never the youtube.com page URL.
+        const string pageUrl    = "https://www.youtube.com/watch?v=test";
+        const string resolvedUrl = "https://cdn.example.com/audio.webm";
+
+        var webm = new FakeCodec("codec.webm", new[] { ".webm" }, new[] { "audio/webm" }, supportsStream: true);
+        var plugin = WithRegistry(webm);
+
+        WebStreamCodecPlugin.YouTubeResolverOverride = (_, url) =>
+        {
+            url.Should().Be(pageUrl, "resolver must be handed the original page URL");
+            return resolvedUrl;
+        };
+
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            // Every HTTP call from the plugin must use the resolved URL.
+            req.RequestUri!.ToString().Should().Be(resolvedUrl);
+            return FakeResponses.SeekableHead(1_000_000, "audio/webm");
+        });
+        WebStreamCodecPlugin.HttpClientOverride = handler.ToClient();
+
+        using var wave = plugin.CreateStream(pageUrl);
+
+        webm.ReceivedStream.Should().BeOfType<SeekableHttpStream>();
+        webm.ReceivedHint.Should().Be("audio/webm");
+    }
+
+    [Fact]
+    public void Non_youtube_urls_skip_the_resolver_entirely()
+    {
+        var mp3 = Mp3StreamCodec();
+        var plugin = WithRegistry(mp3);
+
+        // If the resolver runs for a non-YouTube URL, this throws and the
+        // test fails. It must not run.
+        WebStreamCodecPlugin.YouTubeResolverOverride =
+            (_, _) => throw new InvalidOperationException("resolver should not have been called");
+
+        var handler = new FakeHttpMessageHandler(_ => FakeResponses.SeekableHead(1000, "audio/mpeg"));
+        WebStreamCodecPlugin.HttpClientOverride = handler.ToClient();
+
+        using var _wave = plugin.CreateStream("https://example.com/podcast.mp3");
+        mp3.ReceivedStream.Should().BeOfType<SeekableHttpStream>();
+    }
+
+    [Fact]
+    public void Resolver_failure_surfaces_as_InvalidOperationException()
+    {
+        var plugin = WithRegistry(Mp3StreamCodec());
+        WebStreamCodecPlugin.YouTubeResolverOverride =
+            (_, url) => throw new InvalidOperationException($"resolve failed for {url}");
+        // HttpClientOverride not strictly needed (we throw before any HTTP),
+        // but set it to a tripwire just in case the resolver branch were
+        // accidentally skipped.
+        WebStreamCodecPlugin.HttpClientOverride =
+            new FakeHttpMessageHandler(_ => throw new InvalidOperationException("HTTP must not be called")).ToClient();
+
+        plugin.Invoking(p => p.CreateStream("https://youtu.be/abc"))
+            .Should().Throw<InvalidOperationException>()
+            .WithMessage("*resolve failed*");
     }
 }

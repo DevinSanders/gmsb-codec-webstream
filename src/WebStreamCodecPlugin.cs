@@ -21,8 +21,15 @@ namespace WebStreamCodecPlugin;
 /// <c>codec.flac</c>, … — via the host's <see cref="IAudioCodecRegistry"/>
 /// (exposed on <see cref="IPluginContext.CodecRegistry"/>).</para>
 ///
-/// <para><b>Per-URL routing.</b> Every URL gets a HEAD probe to decide
-/// seekability AND Content-Type. Routing:
+/// <para><b>URL resolution.</b> Some URLs aren't directly playable —
+/// YouTube watch pages return HTML, not audio. <see cref="ResolveUrl"/>
+/// runs upstream of the HEAD probe and rewrites those URLs to a direct
+/// CDN URL via <see cref="YouTubeResolver"/>. Most URLs pass through
+/// unchanged. Future resolvers (PLS/M3U playlists, HLS, …) slot in
+/// alongside YouTube without touching the rest of the pipeline.</para>
+///
+/// <para><b>Per-URL routing.</b> Every URL (post-resolution) gets a HEAD
+/// probe to decide seekability AND Content-Type. Routing:
 /// <list type="bullet">
 ///   <item><description>Server advertises <c>Accept-Ranges: bytes</c>
 ///   with a known <c>Content-Length</c> → <see cref="SeekableHttpStream"/>
@@ -56,7 +63,15 @@ namespace WebStreamCodecPlugin;
 public sealed class WebStreamCodecPlugin : IAudioCodecPlugin
 {
     private static readonly Lazy<HttpClient> s_http = new(CreateHttpClient);
-    private IAudioCodecRegistry? _codecRegistry;
+
+    // Capture the IPluginContext, NOT the registry. The host
+    // (SoundBoard.Core PluginContext) creates the context with a null
+    // CodecRegistry, calls every plugin's Initialize, then — only after
+    // all plugins finish loading — mutates each context to attach the
+    // populated IAudioCodecRegistry. Capturing context.CodecRegistry during
+    // Initialize would freeze us against the null. Reading through the
+    // context lazily at CreateStream time sees the populated registry.
+    private IPluginContext? _context;
 
     // Test seam: unit tests inject an HttpClient backed by a fake message
     // handler so the probe + transports can be exercised without a real
@@ -64,9 +79,15 @@ public sealed class WebStreamCodecPlugin : IAudioCodecPlugin
     internal static HttpClient? HttpClientOverride { get; set; }
     private static HttpClient Http => HttpClientOverride ?? s_http.Value;
 
+    // Test seam: lets unit tests stub the YouTube resolver so dispatch
+    // wiring around CreateStream can be exercised without calling out to
+    // youtube.com. Null in production — falls back to the real YoutubeExplode
+    // path in YouTubeResolver.
+    internal static Func<HttpClient, string, string>? YouTubeResolverOverride { get; set; }
+
     public string Id => "codec.webstream";
     public string Name => "Web Stream Codec";
-    public string Description => "Cross-platform URL-based audio streaming (internet radio, progressive HTTP audio). Decoding is delegated to installed codec plugins (MP3, OGG, FLAC, …); seekability detected per-URL via HEAD probe.";
+    public string Description => "Cross-platform URL-based audio streaming (YouTube, internet radio, progressive HTTP audio). YouTube page URLs are resolved to direct CDN URLs via YoutubeExplode; decoding is delegated to installed codec plugins (MP3, OGG, FLAC, WebM, …). Seekability detected per-URL via HEAD probe.";
     public string Version => PluginVersion.OfAssembly(typeof(WebStreamCodecPlugin));
     public string Author => "Devin Sanders";
 
@@ -77,10 +98,11 @@ public sealed class WebStreamCodecPlugin : IAudioCodecPlugin
 
     public void Initialize(IPluginContext context)
     {
-        // Capture the registry now so CreateStream doesn't have to chase
-        // it later. Stored as a private field rather than re-read on
-        // every call — the registry is immutable once built.
-        _codecRegistry = context?.CodecRegistry;
+        // Capture the context, not the registry. The host attaches the
+        // codec registry to this same context instance AFTER all plugins
+        // finish loading — see the field-level comment for why we must
+        // dereference lazily.
+        _context = context;
     }
 
     public void Shutdown() { }
@@ -90,41 +112,53 @@ public sealed class WebStreamCodecPlugin : IAudioCodecPlugin
         if (string.IsNullOrWhiteSpace(source))
             throw new ArgumentException("Stream URL must not be empty.", nameof(source));
 
-        var registry = _codecRegistry
+        // Read the registry lazily — it's attached to the IPluginContext
+        // by the host AFTER every plugin's Initialize completes. Reading
+        // it now (CreateStream time) sees the populated snapshot.
+        var registry = _context?.CodecRegistry
             ?? throw new InvalidOperationException(
                 "codec.webstream needs the host's codec registry to dispatch decode work. " +
-                "The host should have set IPluginContext.CodecRegistry before calling CreateStream. " +
-                "If you're seeing this, the host is too old to support inter-plugin dispatch (introduced 2026-05-21).");
+                "Either Initialize(IPluginContext) was never called, or the host's " +
+                "IPluginContext.CodecRegistry is still null at CreateStream time " +
+                "(it should be populated once all codec plugins finish loading).");
 
-        // 1. HEAD probe — drives both the seekability and codec-selection
+        // 1. URL resolution. Most URLs pass through unchanged, but some
+        //    "container" URL types (YouTube page URLs being the canonical
+        //    example) point at HTML rather than audio bytes and need
+        //    rewriting to a direct CDN URL before the rest of the pipeline
+        //    can do anything with them. Resolvers handle that asymmetry
+        //    upstream of the HEAD probe so downstream steps stay generic.
+        var resolvedUrl = ResolveUrl(Http, source);
+
+        // 2. HEAD probe — drives both the seekability and codec-selection
         //    decisions. Conservative: anything that doesn't EXPLICITLY
         //    look seekable falls through to the live path.
-        var probe = HttpProbe.Run(Http, source);
+        var probe = HttpProbe.Run(Http, resolvedUrl);
 
-        // 2. Pick the codec via the registry, by MIME first then URL
+        // 3. Pick the codec via the registry, by MIME first then URL
         //    extension. If we can't resolve a codec, throw a useful
         //    error pointing the user at the catalog.
-        var codec = ResolveCodec(registry, source, probe.ContentType);
+        var codec = ResolveCodec(registry, resolvedUrl, probe.ContentType);
 
-        // 3. Open the transport (seekable vs live) and hand it to the
+        // 4. Open the transport (seekable vs live) and hand it to the
         //    codec. Ownership of the transport Stream transfers — the
         //    codec's WaveStream.Dispose() will dispose our transport.
         Stream transport;
         if (probe.LooksSeekable)
         {
-            transport = new SeekableHttpStream(Http, source, probe.ContentLength!.Value);
+            transport = new SeekableHttpStream(Http, resolvedUrl, probe.ContentLength!.Value);
         }
         else
         {
-            transport = LiveTransportStream.Open(Http, source);
+            transport = LiveTransportStream.Open(Http, resolvedUrl);
         }
 
-        // 4. The format hint helps codecs that handle multiple variants
+        // 5. The format hint helps codecs that handle multiple variants
         //    pick the right path. MIME wins over extension when both are
         //    available; falls back to extension parsed from the URL path.
         var hint = !string.IsNullOrEmpty(probe.ContentType)
             ? probe.ContentType!
-            : ExtensionFromUrl(source);
+            : ExtensionFromUrl(resolvedUrl);
 
         try
         {
@@ -137,6 +171,30 @@ public sealed class WebStreamCodecPlugin : IAudioCodecPlugin
             try { transport.Dispose(); } catch { }
             throw;
         }
+    }
+
+    /// <summary>Map a possibly-indirect URL (a YouTube page, etc.) to a
+    /// direct media URL the HEAD probe + transports can consume. Most
+    /// URLs pass through unchanged.
+    ///
+    /// <para>Today this is one branch (YouTube via <see cref="YouTubeResolver"/>)
+    /// — future resolvers (PLS/M3U playlists, HLS master manifests, …)
+    /// would slot in here alongside it. The signature stays
+    /// <c>(string) -&gt; string</c> so the rest of <see cref="CreateStream"/>
+    /// doesn't have to know which kind of URL it started with.</para>
+    ///
+    /// <para>Internal for test access via the
+    /// <see cref="YouTubeResolverOverride"/> seam — tests stub the YouTube
+    /// branch so dispatch wiring can be exercised without hitting
+    /// youtube.com.</para></summary>
+    internal static string ResolveUrl(HttpClient http, string source)
+    {
+        if (YouTubeResolver.IsYouTubeUrl(source))
+        {
+            var stub = YouTubeResolverOverride;
+            return stub is null ? YouTubeResolver.Resolve(http, source) : stub(http, source);
+        }
+        return source;
     }
 
     /// <summary>Look up a <b>Stream-capable</b> codec for this URL. Prefers
