@@ -39,7 +39,7 @@
          dispatch path can handle as ordinary HTTP audio. Pure-managed
          (no native deps) — unlike the SDK/NAudio.Core the host does NOT
          ship a copy of this, so we bundle it (no ExcludeAssets). -->
-    <PackageReference Include="YoutubeExplode" Version="6.6.0" />
+    <PackageReference Include="YoutubeExplode" Version="6.6.1" />
   </ItemGroup>
 
   <ItemGroup>
