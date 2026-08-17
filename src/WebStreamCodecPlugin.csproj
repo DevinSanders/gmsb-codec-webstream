@@ -24,7 +24,7 @@
          different CLR type than ours and casts would fail.
          ExcludeAssets="runtime" keeps the compile-time reference but strips
          NAudio.Core.dll from the publish output. -->
-    <PackageReference Include="NAudio.Core" Version="2.3.0" ExcludeAssets="runtime" />
+    <PackageReference Include="NAudio.Core" Version="3.0.0" ExcludeAssets="runtime" />
 
     <!-- No decoder dependencies. This is a transport-only plugin; it
          delegates decoding to whatever codec plugin (gmsb-codec-mp3,
